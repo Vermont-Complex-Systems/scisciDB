@@ -1,0 +1,15 @@
+[project]
+name = "sciscidb"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "altair>=6.0.0",
+    "dotenv>=0.9.9",
+    "duckdb>=1.4.2",
+    "marimo[sql]>=0.18.0",
+    "pyprojroot>=0.3.0",
+    "pyzmq>=27.1.0",
+    "requests>=2.32.5",
+]
