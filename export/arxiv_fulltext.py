@@ -26,10 +26,10 @@ def get_duckdb_connection():
     conn.execute(f"PRAGMA temp_directory='{temp_dir}';")
 
     # Aggressive memory settings since we have headroom
-    conn.execute("PRAGMA memory_limit='42GB';")  # Use most available memory
-    conn.execute("PRAGMA max_temp_directory_size='300GB';")  # More temp space
-    conn.execute("SET threads=12;")  # More threads for faster processing
-    conn.execute("SET preserve_insertion_order=false;")  # Save memory
+    # conn.execute("PRAGMA memory_limit='42GB';")  # Use most available memory
+    # conn.execute("PRAGMA max_temp_directory_size='300GB';")  # More temp space
+    # conn.execute("SET threads=8;")  # More threads for faster processing
+    # conn.execute("SET preserve_insertion_order=false;")  # Save memory
 
     # Attach DuckLake (adjust password as needed)
     conn.execute("""

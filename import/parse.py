@@ -297,11 +297,11 @@ def parse_json_to_parquet(db_name: str, entity: Optional[str] = None, force: boo
     if db_name == 's2':
         if not entity:
             raise ParseError("S2 parsing requires an entity (papers, authors, etc.)")
-        data_root = Path(os.getenv("S2_DATA_ROOT", PROJECT_ROOT / "input" / "s2_data"))
+        data_root = Path(os.getenv("S2_DATA_ROOT"))
         dataset_dir = data_root / entity
         return _parse_single_dataset(dataset_dir, db_name, entity, force)
     else:  # openalex
-        data_root = Path(os.getenv("OA_DATA_ROOT", PROJECT_ROOT / "input" / "openalex_data"))
+        data_root = Path(os.getenv("OA_DATA_ROOT"))
         if entity:
             # Parse specific entity
             dataset_dir = data_root / "data" / entity
