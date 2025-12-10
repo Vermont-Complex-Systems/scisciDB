@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 import duckdb
 import os
+import re
 from dotenv import load_dotenv
 from pyprojroot import here
 
@@ -40,6 +41,8 @@ def create_table(conn: duckdb.DuckDBPyConnection, db_name: str, entity: str, is_
         table_name = f"s2_{entity}"
     else:
         table_name = entity
+
+    table_name = re.sub("-", "_", table_name)
 
     object_type = "view" if is_view else "table"
     

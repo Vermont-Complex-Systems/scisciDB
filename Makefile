@@ -7,34 +7,35 @@ GROUP_BY ?= field
 FIELD ?= all
 RELEASE ?=
 
+# Simple timing wrapper
+TIME := time -p
+
 download:
 	@echo "=== DOWNLOAD: $(DB) $(ENTITY) ==="
-	python input/download.py $(DB) $(ENTITY)
+	@$(TIME) uv run python input/download.py $(DB) $(ENTITY)
 
 # Format standardization (JSON → Parquet)
 parse:
 	@echo "=== PARSE: $(DB) $(ENTITY) ==="
-	python import/parse.py $(DB) $(ENTITY)
+	@$(TIME) uv run python import/parse.py $(DB) $(ENTITY)
 
 # Database ingestion (Parquet → DuckLake)
 load-view:
 	@echo "=== LOAD VIEW: $(DB) $(ENTITY) ==="
-	python load/load.py $(DB) $(ENTITY) --view
+	@$(TIME) uv run python load/load.py $(DB) $(ENTITY) --view
 
 load-table:
 	@echo "=== LOAD TABLE: $(DB) $(ENTITY) ==="
-	python load/load.py $(DB) $(ENTITY)
-
-
+	@$(TIME) uv run python load/load.py $(DB) $(ENTITY) --no-cleanup
 # Create lookup/mapping tables (dependencies for enrichment)
 create-lookups:
 	@echo "=== CREATE LOOKUPS: Cross-database mapping tables ==="
-	python enrich/create_lookups.py
+	@$(TIME) uv run python enrich/create_lookups.py
 
 # Feature engineering and derived fields (depends on lookups)
 enrich: create-lookups
 	@echo "=== ENRICH: Add derived fields ($(FIELD)) ==="
-	python enrich/add_derived_fields.py --operation $(FIELD)
+	@$(TIME) uv run python enrich/add_derived_fields.py --operation $(FIELD)
 
 
 # export-arxiv-fulltext:

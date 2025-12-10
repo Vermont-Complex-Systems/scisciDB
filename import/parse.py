@@ -234,8 +234,7 @@ def convert_openalex_works(conn: duckdb.DuckDBPyConnection, json_file: Path, out
         COPY (
             SELECT * FROM read_json(
                 '{json_file}',
-                columns={works_columns},
-                ignore_errors=true
+                columns={works_columns}
             )
         )
         TO '{output_file}' 
@@ -251,8 +250,7 @@ def convert_openalex_sources(conn: duckdb.DuckDBPyConnection, json_file: Path, o
         COPY (
             SELECT * FROM read_json(
                 '{json_file}',
-                columns={sources_columns},
-                ignore_errors=true
+                columns={sources_columns}
             )
         )
         TO '{output_file}' 
@@ -304,12 +302,9 @@ def parse_json_to_parquet(db_name: str, entity: Optional[str] = None, force: boo
         data_root = Path(os.getenv("OA_DATA_ROOT"))
         if entity:
             # Parse specific entity
-            dataset_dir = data_root / "data" / entity
+            dataset_dir = data_root / entity
             return _parse_single_dataset(dataset_dir, db_name, entity, force)
-        else:
-            # Parse all entities in OpenAlex snapshot
-            return _parse_openalex_all(data_root, force)
-
+        
 
 def _parse_single_dataset(dataset_dir: Path, db_name: str, entity: str, force: bool = False) -> Path:
     """Parse a single dataset directory"""
@@ -370,35 +365,6 @@ def _parse_single_dataset(dataset_dir: Path, db_name: str, entity: str, force: b
     print(f"[IMPORT] Location: {dataset_dir}/")
 
     return dataset_dir
-
-
-def _parse_openalex_all(data_root: Path, force: bool = False) -> Path:
-    """Parse all entities in OpenAlex snapshot"""
-    data_dir = data_root / "data"
-
-    if not data_dir.exists():
-        raise ParseError(f"OpenAlex data directory not found: {data_dir}")
-
-    # Find all entity directories
-    entity_dirs = [d for d in data_dir.iterdir() if d.is_dir()]
-
-    if not entity_dirs:
-        raise ParseError(f"No entity directories found in {data_dir}")
-
-    print(f"[IMPORT] Parsing OpenAlex full snapshot")
-    print(f"[IMPORT] Found {len(entity_dirs)} entities to parse")
-
-    for entity_dir in entity_dirs:
-        entity_name = entity_dir.name
-        print(f"\n[IMPORT] === Parsing entity: {entity_name} ===")
-        try:
-            _parse_single_dataset(entity_dir, "openalex", entity_name, force)
-        except ParseError as e:
-            print(f"[IMPORT] ⚠️  Skipping {entity_name}: {e}")
-            continue
-
-    print(f"\n[IMPORT] ✓ OpenAlex full snapshot parsing complete!")
-    return data_dir
 
 
 def main():
