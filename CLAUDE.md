@@ -3,49 +3,7 @@
 ## Context
 We designed a data pipeline for large-scale academic datasets (S2ORC from Semantic Scholar, ~50GB+ of papers with full text). The goal was to enable fast analytical queries while maintaining update compatibility with upstream data sources.
 
-## Key Architecture Decisions
-
-1. DuckLake vs Vanilla DuckDB vs MongoDB
-
-Chose DuckLake for incremental updates and version tracking
-Why: S2ORC releases monthly updates (inserts, updates, deletes). DuckLake provides:
-
-Version control (snapshots, time travel)
-Schema evolution
-Change tracking
-ACID transactions
-Metadata stored in PostgreSQL, data in Parquet files
-
-
-
-2. Storage Strategy
-
-Keep data on network mount (`/netfiles/compethicslab/`, 4.3TB available)
-Local disk (95GB) only for code, PostgreSQL metadata, temp files
-Set DuckDB temp directory to network storage: `SET temp_directory='/netfiles/.../duckdb_temp/'`
-
-3. File Format: Parquet with Partitioning
-
-Convert JSON → Parquet (3-5x compression)
-Partition by year for query performance: `PARTITION_BY year`
-DuckDB automatically prunes partitions (skip irrelevant years)
-Keep ~30 files per dataset (200MB each) - sweet spot for parallel processing
-
-4. Handle Nested JSON Fields
-Critical decision: S2ORC ships nested structures as VARCHAR (for bandwidth), but you should convert to STRUCT locally:
-
-```python
-# Convert during parse step (do ONCE)
-CAST(body.annotations.section_header AS JSON) as section_headers
-```
-
-**Why**: 
-- 10-100x faster queries (no JSON parsing overhead)
-- Parquet compresses structs better than strings
-- Columnar access to nested fields
-- Allen AI uses VARCHAR for distribution; you use STRUCT for storage
-
-### 5. **Principled Data Processing Pipeline**
+**Principled Data Processing Pipeline**
 Following Patrick Ball's methodology:
 ```
 scripts/s2orc/
@@ -56,6 +14,7 @@ scripts/s2orc/
 │   └── validate.py
 ├── enrich/         # Add derived fields (like primary_s2field)
 │   └── add_fields.py
+│   └── add_crossover_fields.py  # Cross-dataset enrichment (S2 + OpenAlex)
 ├── export/         # Load to DuckLake
 │   └── update_ducklake.py
 └── Makefile        # Orchestrates: make all DATASET=papers
@@ -68,83 +27,42 @@ Reproducible: Makefile documents process
 Testable: Validate before export
 Versioned: Frozen snapshots for reproducibility
 
-## Key Technical Patterns
-Parse JSON to Parquet with DuckDB
+## Enrichment Best Practices
 
+### Cross-Dataset Enrichment (e.g., S2 + OpenAlex)
+
+When enriching one dataset with another (e.g., adding OpenAlex topics to S2 papers):
+
+**Pattern: Incremental by default, force update for auditability**
 ```python
-# Efficient conversion (streaming, no memory issues)
-duckdb.execute(f"""
-    COPY (SELECT * FROM read_json_auto('{input_file}'))
-    TO '{output_file}' (FORMAT PARQUET, COMPRESSION 'zstd')
-""")
+# Normal monthly sync (fast, only new papers)
+python enrich/add_crossover_fields.py --operation oa_topics
+
+# When papersLookup is updated/fixed (slow, all papers, creates auditable snapshot)
+python enrich/add_crossover_fields.py --operation oa_topics --force-update
 ```
 
-Query Parquet Files Directly
+**Why this works:**
+- `ALTER TABLE ADD COLUMN` is cheap (metadata only, no file rewrites)
+- Incremental `UPDATE WHERE oa_topics IS NULL` only touches new papers (fast, ~200MB snapshots)
+- Force update creates full snapshot for auditability when lookup data changes
+- DuckLake snapshots enable time travel and comparison between enrichment versions
 
+**Snapshot audit trail:**
 ```sql
--- Use VIEWs instead of TABLEs (no data duplication)
-CREATE VIEW papers AS 
-SELECT * FROM read_parquet('/path/to/papers/**/*.parquet');
+-- View enrichment history
+SELECT snapshot_id, commit_message, extra_info
+FROM scisciDB.snapshots()
+WHERE commit_message LIKE '%OpenAlex%';
 
--- Partition pruning happens automatically
-SELECT * FROM papers WHERE year = 2023;  -- Only reads year=2023/ folder
+-- Compare before/after re-enrichment
+SELECT * FROM s2_papers AT (VERSION => 5);  -- Before
+SELECT * FROM s2_papers AT (VERSION => 6);  -- After
+
+-- Rollback if needed
+CREATE OR REPLACE TABLE s2_papers AS
+SELECT * FROM s2_papers AT (VERSION => 5);
 ```
-
-Incremental Updates with DuckLake
-
-```sql 
--- Monthly S2ORC update workflow
-ATTACH 'ducklake:postgres:dbname=complex_stories ...' AS s2 (...);
-USE s2;
-
--- Insert new papers
-INSERT INTO papers SELECT * FROM read_parquet('new_release/*.parquet')
-WHERE corpusid NOT IN (SELECT corpusid FROM papers);
-
--- Update existing
-UPDATE papers SET ... FROM read_parquet('updates/*.parquet') WHERE ...;
-
--- DuckLake creates new snapshot automatically
--- Query historical: SELECT * FROM papers AT (VERSION => 2);
-```
-
-## FastAPI Integration: Two Approaches
-Approach 1: DuckDB Client in FastAPI
-
-```python
-# Direct DuckDB connection for analytical queries
-import duckdb
-conn = duckdb.connect('/path/to/research.duckdb', read_only=True)
-
-@app.get("/papers/author/{author_id}")
-def get_author_papers(author_id: str):
-    result = conn.execute("""
-        SELECT corpusid, title FROM papers
-        WHERE list_contains(list_transform(authors, a -> a.authorid), ?)
-    """, [author_id]).fetchdf()
-    return result.to_dict('records')
-```
-
-Approach 2: pg_duckdb (Recommended)
-PostgreSQL extension that runs DuckDB queries. Use existing SQLAlchemy connections:
-
-```sql
--- In PostgreSQL
-CREATE EXTENSION duckdb_fdw;
-CREATE SERVER duckdb_server FOREIGN DATA WRAPPER duckdb_fdw
-OPTIONS (database '/path/to/research.duckdb');
-IMPORT FOREIGN SCHEMA s2 FROM SERVER duckdb_server INTO public;
-```
-
-```python
-# FastAPI uses normal PostgreSQL connection
-@app.get("/analytics/trends")
-def trends(db = Depends(get_db)):
-    result = db.execute(text("SELECT year, COUNT(*) FROM papers GROUP BY year"))
-    return [dict(row) for row in result]
-```
-
-No caching layer needed - DuckDB is fast enough for real-time analytical queries!
 
 ## Performance Considerations
 
@@ -161,49 +79,6 @@ Filter early: Add WHERE clauses before joins
 **Don't SELECT ***: Especially avoid body.text (huge field) unless needed
 Use VIEWs: Don't materialize unless necessary
 Export subsets: For repeated analysis, export filtered results to smaller Parquet
-
-### DuckDB vs MongoDB for Analytics
-
-DuckDB wins: 86% faster aggregations, 10-100x faster for GROUP BY/joins
-MongoDB better for: Document lookups by ID, transactional writes
-For research: DuckDB is the clear winner
-
-### Common Patterns
-Join Large Tables
-
-```sql
--- Join S2ORC papers (with text) to OpenAlex (with metadata)
-SELECT s2.title, s2.abstract, oa.topics
-FROM s2orc_papers s2
-JOIN openalex_works oa ON s2.corpusid = oa.corpusid
-WHERE oa.year >= 2020;
-```
-
-Text Analysis
-
-```sql
--- Count papers mentioning "machine learning" by year
-SELECT 
-    year,
-    SUM(CASE WHEN body_text ILIKE '%machine learning%' THEN 1 ELSE 0 END) as ml_papers,
-    COUNT(*) as total_papers
-FROM papers
-WHERE year >= 2000
-GROUP BY year;
-```
-
-Extract Nested Annotations
-
-```sql
--- Extract section headers using struct positions
-SELECT 
-    corpusid,
-    list_transform(
-        section_headers,
-        h -> SUBSTRING(body_text, h.start + 1, h.end - h.start)
-    ) as extracted_sections
-FROM papers;
-```
 
 ### Key Lessons
 
@@ -224,3 +99,83 @@ Parquet: Columnar storage format
 Makefile: Pipeline orchestration
 
 This architecture handles 100GB+ datasets efficiently on a single VM with 46GB RAM and 4.3TB network storage.
+
+## DuckLake Usage Guide
+
+### Overview
+
+DuckLake is an ACID-compliant data lakehouse format providing time travel, schema evolution, and transactional guarantees for Parquet data lakes. Built on DuckDB with local file storage.
+
+### Quick Start
+
+```sql
+INSTALL ducklake;
+ATTACH 'ducklake:my_lake.ducklake' AS my_lake;
+USE my_lake;
+```
+
+### Core Constraints
+
+**No Primary Keys/Indexes**: DuckLake doesn't support primary keys, indexes, or unique constraints. Use:
+- **Partitioning** on frequently-filtered columns: `ALTER TABLE sales SET PARTITIONED BY (region, year(order_date));`
+- **File-level statistics** for automatic pruning
+- **Query pattern-driven schema design**
+
+### Essential Best Practices
+
+#### Connection Management
+- Always use `USE database_name` or qualify table names to avoid accidental operations on in-memory database
+- Use relative paths for local storage: `ATTACH 'ducklake:./data/my_lake.ducklake' AS my_lake;`
+
+#### Schema Design
+- Plan schema carefully upfront - avoid frequent structural changes
+- Use snake_case naming for consistency
+- Specify meaningful defaults for new columns
+- Design with type promotions in mind (int32 → int64)
+
+#### Maintenance Strategy
+- Use `CHECKPOINT` for automated maintenance
+- Run `merge_adjacent_files()` for tables with frequent small inserts
+- Configure retention: `expire_older_than` and periodic `cleanup_files()`
+
+#### Performance
+- Partition strategically on query filter columns
+- Configure `target_file_size` (default 512MB) based on usage patterns
+- Use `DATA_INLINING_ROW_LIMIT` for small, frequently-updated tables
+- Set `parquet_compression = 'zstd'` for balanced speed/size
+
+### Configuration Hierarchy
+
+Settings: Table → Schema → Global → Default
+
+```sql
+CALL my_lake.set_option('parquet_compression', 'zstd');                    -- Global
+CALL my_lake.set_option('parquet_compression', 'snappy', schema => 'logs'); -- Schema
+```
+
+### Common Pitfalls
+
+1. **Schema Evolution**: Frequent structural changes hurt maintainability
+2. **File Proliferation**: Monitor small files; use data inlining or batch inserts
+3. **Snapshot Accumulation**: Implement retention policies
+4. **Connection Leaks**: Always detach properly: `DETACH database_name`
+
+### Cleaning Up Duplicate Imports
+
+If you accidentally import data twice, DuckLake's time travel lets you fix it without restarting:
+
+1. **Delete duplicate data**: `DELETE FROM babynames WHERE geo = 'location_name'`
+2. **Re-import correctly**: Run the import again (duplicate prevention now built into loaders)
+3. **List snapshots**: `SELECT * FROM babylake.snapshots()` to identify problematic snapshot IDs
+4. **Expire bad snapshots**: `CALL ducklake_expire_snapshots('babylake', versions => [6, 7])`
+5. **Clean up orphaned files**: `CALL ducklake_delete_orphaned_files('babylake', cleanup_all => true)`
+6. **Verify cleanup**: Check `metadata.ducklake.files/` directory - old parquet files should be removed
+
+Note: In some cases, parquet files may persist even after cleanup. This is safe - DuckDB only reads files referenced by active snapshots. If needed, you can manually remove unreferenced parquet files after verifying the correct data is intact.
+
+### Additional DuckLake Usage References
+
+For detailed usage patterns and advanced features, refer to:
+- `/users/j/s/jstonge1/ducklake-web/docs/stable/duckdb/usage/` - Core usage patterns (connecting, time travel, schema evolution, etc.)
+- `/users/j/s/jstonge1/ducklake-web/docs/stable/duckdb/maintenance/` - Maintenance operations and best practices
+- `/users/j/s/jstonge1/ducklake-web/docs/stable/duckdb/advanced_features/` - Advanced features (partitioning, encryption, etc.)

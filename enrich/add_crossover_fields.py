@@ -8,6 +8,7 @@ import duckdb
 from pathlib import Path
 import logging
 import os
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -40,44 +41,90 @@ def get_duckdb_connection():
     conn.execute("USE scisciDB;")
     return conn
 
-def s2_add_oa_topics(conn):
-    """Add OpenAlex topics and concepts columns to s2_papers table."""
-    logger.info("Adding OpenAlex topic columns to s2_papers...")
+def s2_add_oa_topics(conn, force_update=False):
+    """Add OpenAlex topics and concepts columns to s2_papers table.
 
-    # Add the new columns with full struct definitions
-    conn.execute("""
-        ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_topics
-            STRUCT(id VARCHAR, display_name VARCHAR, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), "domain" STRUCT(id VARCHAR, display_name VARCHAR), score DOUBLE)[];
+    Args:
+        conn: DuckDB connection
+        force_update: If True, re-enriches ALL papers (expensive, creates snapshot).
+                     If False, only enriches papers without OA topics (incremental).
+    """
+    if force_update:
+        logger.warning("FORCE UPDATE MODE: Re-enriching ALL papers (this is expensive!)")
+        logger.warning("This will create a new snapshot for auditability.")
+        where_clause = ""
+    else:
+        logger.info("Incremental enrichment: Only updating papers without OA topics")
+        where_clause = "AND s2.oa_topics IS NULL"
 
-        ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_concepts
-            STRUCT(id VARCHAR, wikidata VARCHAR, display_name VARCHAR, "level" BIGINT, score DOUBLE)[];
+    # Begin transaction for atomic update + commit message
+    conn.execute("BEGIN;")
 
-        ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_primary_topic
-            STRUCT(id VARCHAR, display_name VARCHAR, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), "domain" STRUCT(id VARCHAR, display_name VARCHAR), score DOUBLE);
-    """)
+    try:
+        # Add the new columns with full struct definitions (idempotent)
+        conn.execute("""
+            ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_topics
+                STRUCT(id VARCHAR, display_name VARCHAR, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), "domain" STRUCT(id VARCHAR, display_name VARCHAR), score DOUBLE)[];
 
-    logger.info("Processing older years...")
-    conn.execute("""
-        UPDATE s2_papers AS s2
-        SET
-            oa_topics = oa.topics,
-            oa_concepts = oa.concepts,
-            oa_primary_topic = oa.primary_topic
-        FROM (
-            SELECT corpusid, oa_id
-            FROM papersLookup
-            ORDER BY corpusid, oa_id
-        ) lookup
-        JOIN oa_works oa ON lookup.oa_id = oa.id
-            WHERE s2.corpusid = lookup.corpusid;
-    """)
+            ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_concepts
+                STRUCT(id VARCHAR, wikidata VARCHAR, display_name VARCHAR, "level" BIGINT, score DOUBLE)[];
 
-    # Get enrichment stats
-    total_s2 = conn.execute("SELECT COUNT(*) FROM s2_papers").fetchone()[0]
-    enriched = conn.execute("SELECT COUNT(*) FROM s2_papers WHERE oa_topics IS NOT NULL").fetchone()[0]
+            ALTER TABLE s2_papers ADD COLUMN IF NOT EXISTS oa_primary_topic
+                STRUCT(id VARCHAR, display_name VARCHAR, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), "domain" STRUCT(id VARCHAR, display_name VARCHAR), score DOUBLE);
+        """)
 
-    logger.info(f"Enriched {enriched:,} out of {total_s2:,} S2 papers ({enriched/total_s2*100:.1f}%)")
-    return enriched, total_s2
+        # Update papers with OA topics
+        result = conn.execute(f"""
+            UPDATE s2_papers AS s2
+            SET
+                oa_topics = oa.topics,
+                oa_concepts = oa.concepts,
+                oa_primary_topic = oa.primary_topic
+            FROM (
+                SELECT corpusid, oa_id
+                FROM papersLookup
+                ORDER BY corpusid, oa_id
+            ) lookup
+            JOIN oa_works oa ON lookup.oa_id = oa.id
+            WHERE s2.corpusid = lookup.corpusid
+                {where_clause}
+            RETURNING s2.corpusid;
+        """)
+
+        updated_count = len(result.fetchall())
+
+        # Get enrichment stats
+        total_s2 = conn.execute("SELECT COUNT(*) FROM s2_papers").fetchone()[0]
+        enriched = conn.execute("SELECT COUNT(*) FROM s2_papers WHERE oa_topics IS NOT NULL").fetchone()[0]
+
+        # Tag this snapshot with commit message
+        timestamp = datetime.now().isoformat()
+        if force_update:
+            commit_msg = "FULL RE-ENRICHMENT: OpenAlex topics for all papers"
+            extra_info = f'{{"papers_updated": {updated_count}, "total_enriched": {enriched}, "mode": "force_update", "date": "{timestamp}"}}'
+        else:
+            commit_msg = "Incremental enrichment: OpenAlex topics"
+            extra_info = f'{{"papers_updated": {updated_count}, "total_enriched": {enriched}, "mode": "incremental", "date": "{timestamp}"}}'
+
+        conn.execute(f"""
+            CALL scisciDB.set_commit_message(
+                'enrichment_bot',
+                '{commit_msg}',
+                extra_info => '{extra_info}'
+            );
+        """)
+
+        conn.execute("COMMIT;")
+
+        logger.info(f"Updated {updated_count:,} papers in this run")
+        logger.info(f"Total enriched: {enriched:,} out of {total_s2:,} S2 papers ({enriched/total_s2*100:.1f}%)")
+
+        return enriched, total_s2
+
+    except Exception as e:
+        conn.execute("ROLLBACK;")
+        logger.error(f"Enrichment failed, transaction rolled back: {e}")
+        raise
 
 
 def main():
@@ -88,6 +135,11 @@ def main():
     parser.add_argument("--input", type=Path, default=Path("import"))
     parser.add_argument("--output", type=Path, default=Path("enrich"))
     parser.add_argument("--operation", help="Which enrichment operation to run")
+    parser.add_argument(
+        "--force-update",
+        action="store_true",
+        help="Force re-enrichment of ALL papers (expensive, creates snapshot for auditability)"
+    )
 
     args = parser.parse_args()
 
@@ -96,8 +148,8 @@ def main():
 
         if args.operation == 'oa_topics':
             logger.info("Adding OpenAlex topics and concepts...")
-            s2_add_oa_topics(conn)
-        
+            s2_add_oa_topics(conn, force_update=args.force_update)
+
         logger.info("Enrichment completed successfully!")
 
     except Exception as e:
