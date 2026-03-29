@@ -1,3 +1,8 @@
+# ============================================================================
+# OpenAlex Schemas
+# ============================================================================
+
+
 works_columns = {
     # --- Scalar fields ---
     "id": "VARCHAR",
@@ -90,14 +95,39 @@ sources_columns = {
     # --- Structured objects ---
     "apc_prices": "STRUCT(price INTEGER, currency VARCHAR)[]",
     "counts_by_year": "STRUCT(year INTEGER, works_count INTEGER, cited_by_count INTEGER)[]",
-    "ids": "STRUCT(fatcat VARCHAR, issn VARCHAR[], issn_l VARCHAR, mag INTEGER, openalex VARCHAR, wikidata VARCHAR)",
+    "ids": "STRUCT(fatcat VARCHAR, issn VARCHAR[], issn_l VARCHAR, mag BIGINT, openalex VARCHAR, wikidata VARCHAR)",
     "societies": "STRUCT(url VARCHAR, organization VARCHAR)[]",
-    "summary_stats": "STRUCT(2yr_mean_citedness DOUBLE, h_index INTEGER, i10_index INTEGER)",
+    "summary_stats": 'STRUCT("2yr_mean_citedness" DOUBLE, h_index INTEGER, i10_index INTEGER)',
     "x_concepts": "STRUCT(id VARCHAR, wikidata VARCHAR, display_name VARCHAR, level INTEGER, score DOUBLE)[]"
 }
 
+authors_columns = {
+    # --- Scalar fields ---
+    "id": "VARCHAR",
+    "orcid": "VARCHAR",  
+    "display_name": "VARCHAR",
+    "works_count": "INTEGER",
+    "cited_by_count": "INTEGER",
+    "created_date": "TIMESTAMP",
+    "updated_date": "TIMESTAMP",
+    "works_api_url": "VARCHAR",
+
+    # --- Arrays of simple values ---
+    "display_name_alternatives": "VARCHAR[]",
+
+    # --- Structured objects ---
+    "summary_stats": 'STRUCT("2yr_mean_citedness" DOUBLE, h_index INTEGER, i10_index INTEGER)',
+    "ids": "STRUCT(openalex VARCHAR, orcid VARCHAR)",
+    "affiliations": "STRUCT(institution STRUCT(id VARCHAR, display_name VARCHAR, country_code VARCHAR, ror VARCHAR, type VARCHAR), years INTEGER[])[]",
+    "last_known_institutions": "STRUCT(id VARCHAR, display_name VARCHAR, country_code VARCHAR, ror VARCHAR, type VARCHAR)[]",
+    "topics": "STRUCT(id VARCHAR, display_name VARCHAR, count INTEGER, score DOUBLE, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), domain STRUCT(id VARCHAR, display_name VARCHAR))[]",
+    "topic_share": "STRUCT(id VARCHAR, display_name VARCHAR, value DOUBLE, subfield STRUCT(id VARCHAR, display_name VARCHAR), field STRUCT(id VARCHAR, display_name VARCHAR), domain STRUCT(id VARCHAR, display_name VARCHAR))[]",
+    "x_concepts": "STRUCT(id BIGINT, wikidata VARCHAR, display_name VARCHAR, level INTEGER, score DOUBLE, count INTEGER)[]",
+    "counts_by_year": "STRUCT(year INTEGER, works_count INTEGER, oa_works_count INTEGER, cited_by_count INTEGER)[]"
+}
+
 # ============================================================================
-# S2 (Semantic Scholar) Schemas
+# Semantic Scholar Schemas
 # ============================================================================
 
 s2_papers_columns = {

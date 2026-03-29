@@ -2,6 +2,8 @@
 """
 IMPORT step: Parse and convert raw JSON to Parquet
 Follows principled data processing - converts input/ to import/
+
+When we hit some CREATE TABLE issues downstream, we harcode the schema here.
 """
 import argparse
 import sys
@@ -11,12 +13,13 @@ import json
 import os
 from dotenv import load_dotenv
 from typing import Callable, List, Tuple, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from pyprojroot import here
 PROJECT_ROOT = here()
 
 sys.path.append(str(PROJECT_ROOT))
-from schemas import sources_columns, works_columns, s2_papers_columns
+from schemas import sources_columns, works_columns, s2_papers_columns, authors_columns
 
 load_dotenv()
 
@@ -34,6 +37,7 @@ def find_json_files(dataset_dir: Path) -> List[Path]:
     json_files = set()
     json_files.update(dataset_dir.glob("*.json"))
     json_files.update(dataset_dir.glob("*.json.gz"))
+    json_files.update(dataset_dir.glob("*.gz"))
     json_files.update(dataset_dir.glob("**/*.gz"))
 
     # Convert back to list and filter out metadata files
@@ -253,7 +257,23 @@ def convert_openalex_sources(conn: duckdb.DuckDBPyConnection, json_file: Path, o
                 columns={sources_columns}
             )
         )
-        TO '{output_file}' 
+        TO '{output_file}'
+        (FORMAT PARQUET, COMPRESSION 'zstd');
+    """)
+
+def convert_openalex_authors(conn: duckdb.DuckDBPyConnection, json_file: Path, output_file: Path) -> None:
+    """
+    OpenAlex Authors converter with explicit schema
+    Normalizes orcid field to always be VARCHAR (handles schema evolution)
+    """
+    conn.execute(f"""
+        COPY (
+            SELECT * FROM read_json(
+                '{json_file}',
+                columns={authors_columns}
+            )
+        )
+        TO '{output_file}'
         (FORMAT PARQUET, COMPRESSION 'zstd');
     """)
 
@@ -276,6 +296,8 @@ def get_converter(db_name: str, dataset_name: str) -> Tuple[Callable, str]:
             return convert_openalex_works, "openalex_works"
         elif dataset_name == 'sources':
             return convert_openalex_sources, "openalex_sources"
+        elif dataset_name == 'authors':
+            return convert_openalex_authors, "openalex_authors"
 
     return convert_generic, "generic"
 
@@ -304,7 +326,32 @@ def parse_json_to_parquet(db_name: str, entity: Optional[str] = None, force: boo
             # Parse specific entity
             dataset_dir = data_root / entity
             return _parse_single_dataset(dataset_dir, db_name, entity, force)
-        
+
+def process_file_wrapper(args: Tuple[Path, str, str, bool]) -> Tuple[bool, str, str]:
+    """
+    Wrapper for parallel processing of files
+    Each process needs its own DuckDB connection
+
+    Args:
+        args: Tuple of (json_file, db_name, entity, force)
+
+    Returns:
+        Tuple of (success, output_filename, json_filename)
+    """
+    json_file, db_name, entity, force = args
+
+    # Each process needs its own connection
+    conn = duckdb.connect()
+
+    # Get the appropriate converter
+    converter, _ = get_converter(db_name, entity)
+
+    # Process the file
+    success, output_filename = process_file(conn, json_file, converter, force)
+
+    conn.close()
+
+    return success, output_filename, json_file.name
 
 def _parse_single_dataset(dataset_dir: Path, db_name: str, entity: str, force: bool = False) -> Path:
     """Parse a single dataset directory"""
@@ -333,17 +380,36 @@ def _parse_single_dataset(dataset_dir: Path, db_name: str, entity: str, force: b
         print("[IMPORT] Force mode: cleaning up existing parquet files")
         cleanup_parquet_files(dataset_dir)
 
-    # Setup DuckDB connection
-    conn = duckdb.connect()
-
-    # Process all files
+    # Process all files in parallel
     parsed_files = []
-    for i, json_file in enumerate(sorted(json_files), 1):
-        print(f"[IMPORT] Processing {i}/{len(json_files)}: {json_file.name}")
+    max_workers = min(8, len(json_files))  # Use up to 8 cores
+    print(f"[IMPORT] Using {max_workers} parallel workers")
 
-        success, output_filename = process_file(conn, json_file, converter, force)
-        if success:
-            parsed_files.append(output_filename)
+    # Prepare arguments for parallel processing
+    file_args = [(f, db_name, entity, force) for f in sorted(json_files)]
+
+    # Process files in parallel
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {
+            executor.submit(process_file_wrapper, args): args[0]
+            for args in file_args
+        }
+
+        # Collect results as they complete
+        completed = 0
+        for future in as_completed(future_to_file):
+            completed += 1
+            json_file = future_to_file[future]
+
+            try:
+                success, output_filename, json_filename = future.result()
+                print(f"[IMPORT] Completed {completed}/{len(json_files)}: {json_filename}")
+
+                if success:
+                    parsed_files.append(output_filename)
+            except Exception as e:
+                print(f"[IMPORT] ✗ Failed {json_file.name}: {e}")
 
     # Verify we parsed something
     if not parsed_files:

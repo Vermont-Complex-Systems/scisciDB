@@ -104,56 +104,65 @@ def create_oa_sources_table(conn: duckdb.DuckDBPyConnection) -> None:
     print(f"[LOAD] ✓ oa_sources table created with {count:,} records")
 
 def create_oa_works_table(conn: duckdb.DuckDBPyConnection) -> None:
-    print("[LOAD] Creating oa_works table...")
-    
+    """
+    Create partitioned oa_works table from OpenAlex works parquet files
+    Partitioned by pub_year and primary_topic for optimized filtering
+    """
+    print("[LOAD] Creating partitioned oa_works table...")
+
     # Always drop existing table
     conn.execute("DROP TABLE IF EXISTS oa_works;")
-    
+
     # Get files in reverse order (newest schema first)
     data_root = os.getenv('OA_DATA_ROOT')
     files = conn.execute(f"SELECT * FROM glob('{data_root}/works/**/*.parquet')").fetchall()
     files = sorted([x[0] for x in files], reverse=True)
-    
+
     print(f"[LOAD] Loading {len(files)} parquet files...")
-    
+
+    # Step 1: Create empty table with base schema from first file
+    print("[LOAD] Creating base table schema...")
     conn.execute(f"""
-        CREATE TABLE oa_works AS 
-        SELECT * FROM read_parquet({files}, union_by_name=true);
+        CREATE TABLE oa_works AS
+        SELECT *
+        FROM read_parquet({files}, union_by_name=true)
+        WHERE 1=0;
     """)
-    
+
+    # Step 2: Add partition columns
+    print("[LOAD] Adding partition columns...")
+    conn.execute("""
+        ALTER TABLE oa_works ADD COLUMN primary_topic_id VARCHAR;
+    """)
+    conn.execute("""
+        ALTER TABLE oa_works ADD COLUMN primary_topic INTEGER;
+    """)
+
+    # Step 3: Set partitioning
+    print("[LOAD] Setting partition scheme (publication_year, primary_topic)...")
+    conn.execute("""
+        ALTER TABLE oa_works SET PARTITIONED BY (publication_year, primary_topic);
+    """)
+
+    # Insert data with partition columns
+    print("[LOAD] Inserting data into partitioned table...")
+    conn.execute(f"""
+        INSERT INTO oa_works
+        SELECT
+            *,
+            topics[1].id AS primary_topic_id,
+            CAST(regexp_extract(
+                topics[1].id,
+                'T(\\d{{3}})',
+                1
+            ) AS INTEGER) AS primary_topic
+        FROM read_parquet({files}, union_by_name=true)
+        WHERE len(topics) > 0;
+    """)
+
     # Verify
     count = conn.execute("SELECT COUNT(*) FROM oa_works;").fetchone()[0]
     print(f"[LOAD] ✓ oa_works table created with {count:,} records")
-
-def create_oa_authors_table(conn: duckdb.DuckDBPyConnection) -> None:
-    """
-    Create oa_authors table from OpenAlex authors parquet files
-    
-    Always drops and recreates the table.
-    """
-    print("[LOAD] Creating oa_authors table...")
-    
-    # Always drop existing table
-    conn.execute("DROP TABLE IF EXISTS oa_authors;")
-    print("[LOAD] Dropped existing table (if any)")
-    
-    # Get files in reverse order (newest schema first)
-    data_root = os.getenv('OA_DATA_ROOT')
-    files = conn.execute(f"SELECT * FROM glob('{data_root}/authors/**/*.parquet')").fetchall()
-    files = sorted([x[0] for x in files], reverse=True)
-    
-    # Only use first 600 files (schema conflicts in older files)
-    print(f"[LOAD] Loading {len(files)}/{len(files)} parquet files...")
-    
-    conn.execute(f"""
-        CREATE TABLE oa_authors AS 
-        SELECT * FROM read_parquet({files});
-    """)
-    
-    # Verify
-    count = conn.execute("SELECT COUNT(*) FROM oa_authors;").fetchone()[0]
-    print(f"[LOAD] ✓ oa_authors table created with {count:,} records")
-
 
 def main():
     parser = argparse.ArgumentParser(description="LOAD: Create tables and views in DuckLake from parquet data")
@@ -162,7 +171,7 @@ def main():
     parser.add_argument('entity', help='Entity name (papers, works, authors, etc.)')
     parser.add_argument('--view', action='store_true', help='Create view instead of table')
     parser.add_argument('--no-cleanup', action='store_true', help='Keep parquet files after table creation (ignored for views)')
-    
+
     args = parser.parse_args()
 
     try:

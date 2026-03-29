@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "altair[all,save]>=6.0.0",
+    "datasets>=4.4.1",
     "dotenv>=0.9.9",
     "duckdb>=1.4.2",
     "duckdb-engine>=0.17.0",
@@ -21,6 +22,10 @@ dependencies = [
     "pyprojroot>=0.3.0",
     "pyzmq>=27.1.0",
     "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
     "toml>=0.10.2",
+    "torch>=2.9.1",
+    "transformers[torch]>=4.57.3",
     "vega>=4.1.0",
+    "wandb>=0.23.1",
 ]
