@@ -240,8 +240,9 @@ def convert_openalex_works(conn: duckdb.DuckDBPyConnection, json_file: Path, out
                 '{json_file}',
                 columns={works_columns}
             )
+            ORDER BY publication_year
         )
-        TO '{output_file}' 
+        TO '{output_file}'
         (FORMAT PARQUET, COMPRESSION 'zstd');
     """)
 

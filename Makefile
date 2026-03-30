@@ -17,7 +17,7 @@ download:
 # Format standardization (JSON → Parquet)
 parse:
 	@echo "=== PARSE: $(DB) $(ENTITY) ==="
-	@$(TIME) uv run python import/parse.py $(DB) $(ENTITY)
+	@$(TIME) uv run python import/parse.py $(DB) $(ENTITY) $(if $(filter 1,$(FORCE)),--force)
 
 # Database ingestion (Parquet → DuckLake)
 load-view:
@@ -27,6 +27,7 @@ load-view:
 load-table:
 	@echo "=== LOAD TABLE: $(DB) $(ENTITY) ==="
 	@$(TIME) uv run python load/load.py $(DB) $(ENTITY) --no-cleanup
+
 # Create lookup/mapping tables (dependencies for enrichment)
 create-lookups:
 	@echo "=== CREATE LOOKUPS: Cross-database mapping tables ==="
