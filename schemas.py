@@ -148,4 +148,3 @@ s2_papers_columns = {
     'publicationdate': 'DATE',
     'journal': 'STRUCT(name VARCHAR, pages VARCHAR, volume VARCHAR)'
 }
-

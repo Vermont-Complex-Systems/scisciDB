@@ -3,11 +3,17 @@ name = "scisciDB"
 requires-python = ">=3.12"
 version = "0.1.0"
 dependencies = [
+    "altair>=6.0.0",
     "dagster==1.12.21",
     "dagster-slurm",
     "duckdb>=1.5.1",
+    "duckdb-engine>=0.17.0",
+    "jupysql>=0.11.1",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.2",
     "pyprojroot",
     "python-dotenv",
+    "vl-convert-python>=1.9.0.post1",
 ]
 
 [dependency-groups]

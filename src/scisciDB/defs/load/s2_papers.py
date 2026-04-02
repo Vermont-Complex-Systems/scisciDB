@@ -35,11 +35,6 @@ def s2_papers(
     config: S2PapersConfig,
     compute: ScisciDBComputeResource,
 ) -> dg.MaterializeResult:
-    if not compute.use_slurm:
-        raise RuntimeError(
-            "s2_papers must be run with use_slurm=True — source data only exists on VACC gpfs. "
-            "Set use_slurm=True in the Dagster launchpad before materializing."
-        )
     # Parse mem string (e.g. "64G") to set DuckDB limit at ~90% to leave headroom
     # for the OS and dagster-pipes overhead.
     mem_value = int(config.mem.rstrip("GgMm"))
