@@ -1,20 +1,16 @@
 import os
-from pathlib import Path
 
 import dagster as dg
 from dagster_slurm import BashLauncher, ComputeResource, SlurmQueueConfig, SlurmResource, SSHConnectionResource
 from dotenv import load_dotenv
+from pyprojroot import here
 
-load_dotenv()
+_PROJECT_ROOT = here()
 
-# Project root: src/scisciDB/defs/resources.py -> up 4 levels
-_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
-# DuckLake catalog stays in the project directory (small SQLite file, NFS-accessible from VACC).
-# Override via SCISCIDB_METADATA_PATH if you ever need to relocate it.
-_DEFAULT_METADATA_PATH = str(
-    Path(os.environ.get("SCISCIDB_METADATA_PATH", str(_PROJECT_ROOT / "metadata.ducklake")))
-)
+
+_DEFAULT_METADATA_PATH = str(_PROJECT_ROOT / "metadata.ducklake")
 
 
 class ScisciDBComputeResource(dg.ConfigurableResource):
@@ -54,23 +50,19 @@ class ScisciDBComputeResource(dg.ConfigurableResource):
         compute = self._slurm() if self.use_slurm else self._local()
 
         # Inject shared paths so payloads don't need to load .env themselves.
-        # When running on SLURM, prefer the VACC-local gpfs path for source data
-        # (faster I/O than netfiles); fall back to OA_DATA_ROOT for local runs.
+        # SLURM_ prefixed vars point to faster VACC-local gpfs paths.
+        prefix = "SLURM_" if self.use_slurm else ""
         extras = kwargs.pop("extras", None) or {}
         extras.setdefault("metadata_path", _DEFAULT_METADATA_PATH)
         extras.setdefault("sciscidb_data_root", os.environ.get("SCISCIDB_DATA_ROOT", ""))
-        if self.use_slurm:
-            extras.setdefault("oa_data_root", os.environ.get("SLURM_OA_DATA_ROOT", os.environ.get("OA_DATA_ROOT", "")))
-            extras.setdefault("s2_data_root", os.environ.get("SLURM_S2_DATA_ROOT", os.environ.get("S2_DATA_ROOT", "")))
-        else:
-            extras.setdefault("oa_data_root", os.environ.get("OA_DATA_ROOT", ""))
-            extras.setdefault("s2_data_root", os.environ.get("S2_DATA_ROOT", ""))
+        extras.setdefault("oa_data_root", os.environ.get(f"{prefix}OA_DATA_ROOT", os.environ.get("OA_DATA_ROOT", "")))
+        extras.setdefault("s2_data_root", os.environ.get(f"{prefix}S2_DATA_ROOT", os.environ.get("S2_DATA_ROOT", "")))
 
         # Always upload payload_utils.py so every payload can: from payload_utils import ...
         extra_files = list(kwargs.pop("extra_files", None) or [])
-        utils_path = Path(__file__).parent.parent / "payload_utils.py"
-        if str(utils_path) not in extra_files:
-            extra_files.append(str(utils_path))
+        utils_path = str(_PROJECT_ROOT / "src" / "scisciDB" / "payload_utils.py")
+        if utils_path not in extra_files:
+            extra_files.append(utils_path)
 
         return compute.run(
             context=context,

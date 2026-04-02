@@ -45,17 +45,22 @@ def main(context):
     context.log.info(f"DuckLake catalog: {metadata_path}")
     context.log.info(f"Data root: {sciscidb_data_root}")
 
+    duckdb_memory_limit = context.get_extra("duckdb_memory_limit") or "110GB"
+    duckdb_threads = context.get_extra("duckdb_threads") or 32
+
     conn = duckdb.connect()
     try:
         conn.execute(f"SET temp_directory = '{duckdb_tmp}/'")
-        conn.execute("SET memory_limit = '110GB'")
-        conn.execute("SET threads = 32")
+        conn.execute(f"SET memory_limit = '{duckdb_memory_limit}'")
+        conn.execute(f"SET threads = {duckdb_threads}")
         conn.execute("SET max_temp_directory_size = '500GB'")
         conn.execute("SET preserve_insertion_order = false")
         conn.execute("SET enable_progress_bar = true")
         # Keep all year-partitions open at once so each thread writes at most
         # one file per partition (avoids many small fragment files).
-        conn.execute("SET partitioned_write_max_open_files = 600")
+        conn.execute("SET partitioned_write_max_open_files = 16")
+
+        test_year = context.get_extra("test_year") or 0
 
         conn.execute(f"""
             ATTACH 'ducklake:{metadata_path}' AS scisciDB
@@ -64,17 +69,37 @@ def main(context):
         conn.execute("USE scisciDB")
         conn.execute("DROP TABLE IF EXISTS oa_works")
 
-        n_files = len(list(__import__("pathlib").Path(source_dir).rglob("*.parquet")))
-        context.log.info(f"Creating oa_works table from {n_files} parquet files — this may take ~2h...")
+        # Create empty table with schema inferred from parquet (no rows read).
+        # Partitioning must be set BEFORE inserting data — DuckLake only applies
+        # the partition key to new writes, so ALTER TABLE after a CTAS is too late.
         conn.execute(f"""
             CREATE TABLE oa_works AS
+            SELECT * FROM read_parquet('{source_dir}/**/*.parquet')
+            WHERE 1=0
+        """)
+        conn.execute("ALTER TABLE oa_works SET PARTITIONED BY (publication_year)")
+
+        year_filter = (
+            f"publication_year = {test_year}"
+            if test_year
+            else "publication_year BETWEEN 1900 AND 2026"
+        )
+        if test_year:
+            context.log.info(f"TEST MODE: inserting only year {test_year}")
+
+        import time
+        n_files = len(list(__import__("pathlib").Path(source_dir).rglob("*.parquet")))
+        context.log.info(f"Inserting oa_works from {n_files} parquet files...")
+        t0 = time.time()
+        conn.execute(f"""
+            INSERT INTO oa_works
             SELECT *
             FROM read_parquet('{source_dir}/**/*.parquet')
-            WHERE publication_year BETWEEN 1500 AND 2026
+            WHERE {year_filter}
         """)
-        context.log.info("CREATE TABLE completed, running stats...")
-
-        conn.execute("ALTER TABLE oa_works SET PARTITIONED BY (publication_year)")
+        elapsed = time.time() - t0
+        context.log.info(f"INSERT completed in {elapsed:.1f}s")
+        context.log.info("Running stats...")
 
         total_rows, years, min_year, max_year = conn.execute("""
             SELECT
@@ -94,6 +119,8 @@ def main(context):
             "distinct_years": years,
             "min_year": min_year,
             "max_year": max_year,
+            "elapsed_seconds": round(elapsed, 1),
+            "test_year": test_year or "all",
             "source_dir": source_dir,
             "metadata_path": metadata_path,
             **collect_resource_usage(),

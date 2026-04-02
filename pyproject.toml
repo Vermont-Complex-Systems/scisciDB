@@ -6,6 +6,7 @@ dependencies = [
     "dagster==1.12.21",
     "dagster-slurm",
     "duckdb>=1.5.1",
+    "pyprojroot",
     "python-dotenv",
 ]
 

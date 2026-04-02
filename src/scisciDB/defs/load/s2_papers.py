@@ -15,8 +15,9 @@ class S2PapersConfig(dg.Config):
     dry_run: bool = False
     partition: str = "short"
     mem: str = "64G"
-    cpus_per_task: int = 8
+    cpus_per_task: int = 16
     time_limit: str = "02:00:00"
+    test_year: int = 0  # If non-zero, only insert this year (for testing)
 
 
 @dg.asset(
@@ -52,6 +53,7 @@ def s2_papers(
             "dry_run": config.dry_run,
             "duckdb_memory_limit": duckdb_mem,
             "duckdb_threads": config.cpus_per_task,
+            "test_year": config.test_year or None,
         },
         extra_slurm_opts={
             "partition": config.partition,
