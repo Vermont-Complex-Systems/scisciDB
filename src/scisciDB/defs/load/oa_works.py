@@ -25,8 +25,8 @@ class OaWorksConfig(dg.Config):
     description=(
         "Load OpenAlex works parquet files into DuckLake, partitioned by "
         "publication_year. Source data lives only on VACC gpfs — must be run "
-        "with use_slurm=True. Tune partition/mem/cpus_per_task/time_limit in "
-        "the launchpad."
+        "with use_slurm=True, or use_slurm=False when running directly on VACC. "
+        "Tune partition/mem/cpus_per_task/time_limit in the launchpad."
     ),
 )
 def oa_works(
@@ -34,11 +34,6 @@ def oa_works(
     config: OaWorksConfig,
     compute: ScisciDBComputeResource,
 ) -> dg.MaterializeResult:
-    if not compute.use_slurm:
-        raise RuntimeError(
-            "oa_works must be run with use_slurm=True — source data only exists on VACC gpfs. "
-            "Set use_slurm=True in the Dagster launchpad before materializing."
-        )
     mem_value = int(config.mem.rstrip("GgMm"))
     mem_unit = config.mem[-1].upper()
     duckdb_mem = f"{int(mem_value * 0.9)}{mem_unit}B"
