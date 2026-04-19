@@ -1,10 +1,9 @@
 """
-Asset: s2_oa_topics
+Asset: s2_has_fulltext
 
-Enriches s2_papers with OpenAlex topics, concepts, and primary_topic
-by joining through papersLookup. Incremental by default — only updates
-papers that don't yet have oa_topics. Set force_update=True to re-enrich all.
-Runs on VACC via SLURM (data lives only on VACC gpfs).
+Adds has_fulltext boolean column to s2_papers by checking existence
+in s2orc_v2. Incremental by default — only updates papers where
+the flag is NULL. Runs on VACC via SLURM.
 """
 from pathlib import Path
 
@@ -13,7 +12,7 @@ import dagster as dg
 from scisciDB.defs.resources import ScisciDBComputeResource
 
 
-class S2OaTopicsConfig(dg.Config):
+class S2HasFulltextConfig(dg.Config):
     force_update: bool = False
     partition: str = "short"
     mem: str = "128G"
@@ -23,22 +22,21 @@ class S2OaTopicsConfig(dg.Config):
 
 @dg.asset(
     kinds={"duckdb", "ducklake"},
-    group_name="enrich",
-    deps=["papers_lookup"],
+    group_name="derived_fields",
+    deps=["s2orc_v2"],
     description=(
-        "Add oa_topics, oa_concepts, and oa_primary_topic columns to s2_papers "
-        "via papersLookup + oa_works join. Incremental by default; "
-        "set force_update=True in the launchpad to re-enrich all papers."
+        "Add has_fulltext boolean column to s2_papers via semi-join "
+        "against s2orc_v2. Incremental by default."
     ),
 )
-def s2_oa_topics(
+def s2_has_fulltext(
     context: dg.AssetExecutionContext,
-    config: S2OaTopicsConfig,
+    config: S2HasFulltextConfig,
     compute: ScisciDBComputeResource,
 ) -> dg.MaterializeResult:
     if not compute.use_slurm:
         raise RuntimeError(
-            "s2_oa_topics must be run with use_slurm=True — data only exists on VACC gpfs."
+            "s2_has_fulltext must be run with use_slurm=True — data only exists on VACC gpfs."
         )
 
     mem_value = int(config.mem.rstrip("GgMm"))
@@ -46,7 +44,7 @@ def s2_oa_topics(
 
     return compute.run(
         context=context,
-        payload_path=str(Path(__file__).parent / "payloads" / "s2_oa_topics.py"),
+        payload_path=str(Path(__file__).parent / "payloads" / "s2_has_fulltext.py"),
         extras={
             "duckdb_memory_limit": duckdb_mem,
             "duckdb_threads": config.cpus_per_task,

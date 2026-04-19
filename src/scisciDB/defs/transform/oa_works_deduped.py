@@ -2,21 +2,30 @@
 Asset: oa_works_deduped
 
 Creates a deduplicated view of oa_works, keeping the best record per DOI.
-Runs locally (just a view definition in DuckLake — no data is moved).
+Runs on VACC via SLURM (data lives only on VACC gpfs).
+
+Deduplication strategy:
+  - One record per DOI, ranked by richest metadata.
+  - Ranking: cited_by_count > number of authors > has abstract > number of
+    topics > OpenAlex ID (stable tiebreaker).
+  - Well-validated for DOI pairs (~98% of duplicates). For DOIs with 3+
+    records (often issue-level DOIs assigned to multiple distinct papers)
+    the ranking is best-effort — we still keep one record to ensure DOI
+    uniqueness for downstream S2↔OA matching.
+  - Rows without a DOI are dropped (no use for downstream S2↔OA matching).
 """
-import os
 from pathlib import Path
 
 import dagster as dg
-import duckdb
-from dotenv import load_dotenv
 
-load_dotenv()
+from scisciDB.defs.resources import ScisciDBComputeResource
 
-_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
-_DEFAULT_METADATA_PATH = str(
-    Path(os.environ.get("SCISCIDB_METADATA_PATH", str(_PROJECT_ROOT / "metadata.ducklake")))
-)
+
+class OaWorksDedupedConfig(dg.Config):
+    partition: str = "short"
+    mem: str = "4G"
+    cpus_per_task: int = 1
+    time_limit: str = "00:10:00"
 
 
 @dg.asset(
@@ -25,57 +34,28 @@ _DEFAULT_METADATA_PATH = str(
     deps=["oa_works"],
     description=(
         "Deduplicated view of oa_works: one record per DOI, ranked by "
-        "Crossref > most concepts > most topics > ID."
+        "cited_by_count > authors > has_abstract > topics > ID. "
+        "Rows without a DOI are dropped."
     ),
 )
-def oa_works_deduped(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    metadata_path = _DEFAULT_METADATA_PATH
-    sciscidb_data_root = os.environ.get("SCISCIDB_DATA_ROOT", "")
-
-    conn = duckdb.connect()
-    try:
-        conn.execute(f"""
-            ATTACH 'ducklake:{metadata_path}' AS scisciDB
-                (DATA_PATH '{sciscidb_data_root}')
-        """)
-        conn.execute("USE scisciDB")
-
-        conn.execute("DROP VIEW IF EXISTS oa_works_deduped")
-        conn.execute("""
-            CREATE VIEW oa_works_deduped AS
-            WITH ranked_ids AS (
-                SELECT id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY doi
-                        ORDER BY
-                            CASE WHEN doi_registration_agency = 'crossref' THEN 1 ELSE 2 END,
-                            concepts_count DESC NULLS LAST,
-                            topics_count DESC NULLS LAST,
-                            id
-                    ) AS rn
-                FROM oa_works
-                WHERE doi IS NOT NULL
-            )
-            SELECT w.*
-            FROM oa_works w
-            JOIN ranked_ids r ON w.id = r.id
-            WHERE r.rn = 1
-        """)
-
-        original = conn.execute(
-            "SELECT COUNT(*) FROM oa_works WHERE doi IS NOT NULL"
-        ).fetchone()[0]
-        deduped = conn.execute("SELECT COUNT(*) FROM oa_works_deduped").fetchone()[0]
-        removed = original - deduped
-
-        context.log.info(
-            f"Deduplicated: {original:,} → {deduped:,} (removed {removed:,} duplicates)"
+def oa_works_deduped(
+    context: dg.AssetExecutionContext,
+    config: OaWorksDedupedConfig,
+    compute: ScisciDBComputeResource,
+) -> dg.MaterializeResult:
+    if not compute.use_slurm:
+        raise RuntimeError(
+            "oa_works_deduped must be run with use_slurm=True — data only exists on VACC gpfs."
         )
 
-        return dg.MaterializeResult(metadata={
-            "original_rows": original,
-            "deduped_rows": deduped,
-            "duplicates_removed": removed,
-        })
-    finally:
-        conn.close()
+    return compute.run(
+        context=context,
+        payload_path=str(Path(__file__).parent / "payloads" / "oa_works_deduped.py"),
+        extras={},
+        extra_slurm_opts={
+            "partition": config.partition,
+            "cpus_per_task": config.cpus_per_task,
+            "mem": config.mem,
+            "time_limit": config.time_limit,
+        },
+    ).get_results()
